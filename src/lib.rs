@@ -24,6 +24,7 @@ pub struct Screen {
     stored_x: u16,
     stored_y: u16,
     force_redraw: bool,
+    // TODO: remove redraws counter
     redraws: usize,
     fg_color: Color,
     bg_color: Color,
