@@ -1,7 +1,7 @@
 use std::io::{self, stdout, Write};
 
 use cell::Cell;
-use crossterm::{cursor::MoveTo, style::{Attributes, Color, Colors, Print, SetColors}, terminal::{self, disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen}, ExecutableCommand, QueueableCommand};
+use crossterm::{cursor::MoveTo, style::{Color, Colors, Print, SetColors}, terminal::{self, disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen}, ExecutableCommand, QueueableCommand};
 
 mod cell;
 
