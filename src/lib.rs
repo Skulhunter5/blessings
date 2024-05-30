@@ -4,6 +4,9 @@ use cell::Cell;
 use crossterm::{cursor::MoveTo, style::{Color, Colors, Print, SetColors}, terminal::{self, disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen}, ExecutableCommand, QueueableCommand};
 
 mod cell;
+mod cursor;
+
+pub use cursor::CursorStyle;
 
 #[derive(Debug, Clone, Copy)]
 pub enum ClearType {
@@ -28,6 +31,10 @@ pub struct Screen {
     redraws: usize,
     fg_color: Color,
     bg_color: Color,
+    new_cursor_style: CursorStyle,
+    cur_cursor_style: CursorStyle,
+    new_cursor_visibility: bool,
+    cur_cursor_visibility: bool,
 }
 
 impl Screen {
@@ -50,6 +57,12 @@ impl Screen {
         let fg_color = Color::Reset;
         let bg_color = Color::Reset;
 
+        let new_cursor_style = CursorStyle::DefaultUserShape;
+        let cur_cursor_style = CursorStyle::DefaultUserShape;
+
+        let new_cursor_visibility = true;
+        let cur_cursor_visibility = true;
+
         Ok(Self {
             new_screen,
             cur_screen,
@@ -63,6 +76,10 @@ impl Screen {
             redraws: 0,
             fg_color,
             bg_color,
+            new_cursor_style,
+            cur_cursor_style,
+            new_cursor_visibility,
+            cur_cursor_visibility,
         })
     }
 
@@ -84,6 +101,30 @@ impl Screen {
         disable_raw_mode()?;
 
         Ok(())
+    }
+
+    pub fn get_cursor_style(&mut self) -> CursorStyle {
+        self.new_cursor_style
+    }
+
+    pub fn set_cursor_style(&mut self, style: CursorStyle) {
+        self.new_cursor_style = style;
+    }
+
+    pub fn get_cursor_visibility(&mut self) -> bool {
+        self.new_cursor_visibility
+    }
+
+    pub fn set_cursor_visibility(&mut self, visibility: bool) {
+        self.new_cursor_visibility = visibility;
+    }
+
+    pub fn show_cursor(&mut self) {
+        self.set_cursor_visibility(true);
+    }
+
+    pub fn hide_cursor(&mut self) {
+        self.set_cursor_visibility(false);
     }
 
     pub fn save_position(&mut self) {
@@ -296,8 +337,6 @@ impl Screen {
             stdout.queue(MoveTo(x as u16, y as u16))?;
             stdout.queue(Print(self.new_screen[start..i].iter().map(|cell| cell.c).collect::<String>()))?;
         }
-        stdout.queue(MoveTo(self.cursor_x, self.cursor_y))?;
-        stdout.flush()?;
 
         Ok(())
     }
@@ -378,9 +417,23 @@ impl Screen {
                 stdout.queue(MoveTo(x as u16, y as u16))?;
                 stdout.queue(Print(self.new_screen[start..i].iter().map(|cell| cell.c).collect::<String>()))?;
             }
-            stdout.queue(MoveTo(self.cursor_x, self.cursor_y))?;
-            stdout.flush()?;
         }
+
+        if self.new_cursor_style != self.cur_cursor_style {
+            stdout.queue(self.new_cursor_style.to_crossterm_command())?;
+            self.cur_cursor_style = self.new_cursor_style;
+        }
+
+        if self.new_cursor_visibility != self.cur_cursor_visibility {
+            match self.new_cursor_visibility {
+                true => stdout.queue(crossterm::cursor::Show),
+                false => stdout.queue(crossterm::cursor::Hide),
+            }?;
+            self.cur_cursor_visibility = self.new_cursor_visibility;
+        }
+
+        stdout.queue(MoveTo(self.cursor_x, self.cursor_y))?;
+        stdout.flush()?;
 
         self.force_redraw = false;
 
