@@ -27,8 +27,6 @@ pub struct Screen {
     stored_x: u16,
     stored_y: u16,
     force_redraw: bool,
-    // TODO: remove redraws counter
-    redraws: usize,
     fg_color: Color,
     bg_color: Color,
     new_cursor_style: CursorStyle,
@@ -73,7 +71,6 @@ impl Screen {
             stored_x,
             stored_y,
             force_redraw: false,
-            redraws: 0,
             fg_color,
             bg_color,
             new_cursor_style,
@@ -308,7 +305,6 @@ impl Screen {
             if new_cell.fg_color != fg_color || new_cell.bg_color != bg_color {
                 // print remaining deltas with previous colors
                 if start < i {
-                    self.redraws += 1;
                     let x = start % width;
                     let y = start / width;
                     stdout.queue(MoveTo(x as u16, y as u16))?;
@@ -331,7 +327,6 @@ impl Screen {
             }
         }
         if start < i {
-            self.redraws += 1;
             let x = start % width;
             let y = start / width;
             stdout.queue(MoveTo(x as u16, y as u16))?;
@@ -343,8 +338,6 @@ impl Screen {
 
     pub fn show(&mut self) -> io::Result<()> {
         let mut stdout = stdout();
-
-        self.redraws = 0;
 
         //self.force_redraw = true;
         if self.force_redraw {
@@ -368,7 +361,6 @@ impl Screen {
 
                 if new_cell == cur_cell {
                     if start < i {
-                        self.redraws += 1;
                         let x = start % width;
                         let y = start / width;
                         stdout.queue(MoveTo(x as u16, y as u16))?;
@@ -387,7 +379,6 @@ impl Screen {
                     if new_cell.fg_color != fg_color || new_cell.bg_color != bg_color {
                         // print remaining deltas with previous colors
                         if start < i {
-                            self.redraws += 1;
                             let x = start % width;
                             let y = start / width;
                             stdout.queue(MoveTo(x as u16, y as u16))?;
@@ -411,7 +402,6 @@ impl Screen {
                 }
             }
             if start < i {
-                self.redraws += 1;
                 let x = start % width;
                 let y = start / width;
                 stdout.queue(MoveTo(x as u16, y as u16))?;
@@ -440,10 +430,6 @@ impl Screen {
         self.cur_screen.copy_from_slice(&self.new_screen);
 
         Ok(())
-    }
-
-    pub fn get_redraws(&mut self) -> usize {
-        self.redraws
     }
 
     fn set_buffer_at(&mut self, x: usize, y: usize, value: char) {
