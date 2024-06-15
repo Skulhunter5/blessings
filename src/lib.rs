@@ -1,12 +1,21 @@
 use std::io::{self, stdout, Write};
 
 use cell::Cell;
-use crossterm::{cursor::MoveTo, style::{Color, Colors, Print, SetColors}, terminal::{self, disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen}, ExecutableCommand, QueueableCommand};
+use crossterm::{
+    cursor::MoveTo,
+    style::{Color, Colors, Print, SetColors},
+    terminal::{
+        self, disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    },
+    ExecutableCommand, QueueableCommand,
+};
 
 mod cell;
 mod cursor;
+mod util;
 
 pub use cursor::CursorStyle;
+use util::{Point, WindowBounds};
 
 #[derive(Debug, Clone, Copy)]
 pub enum ClearType {
@@ -22,10 +31,8 @@ pub struct Screen {
     cur_screen: Box<[Cell]>,
     width: u16,
     height: u16,
-    cursor_x: u16,
-    cursor_y: u16,
-    stored_x: u16,
-    stored_y: u16,
+    cursor: Point,
+    stored_cursor: Point,
     force_redraw: bool,
     fg_color: Color,
     bg_color: Color,
@@ -33,6 +40,7 @@ pub struct Screen {
     cur_cursor_style: CursorStyle,
     new_cursor_visibility: bool,
     cur_cursor_visibility: bool,
+    windows: Vec<WindowBounds>,
 }
 
 impl Screen {
@@ -46,11 +54,8 @@ impl Screen {
         let new_screen = vec![Screen::EMPTY_CELL; buffer_size].into_boxed_slice();
         let cur_screen = vec![Screen::EMPTY_CELL; buffer_size].into_boxed_slice();
 
-        let cursor_x = 0;
-        let cursor_y = 0;
-
-        let stored_x = 0;
-        let stored_y = 0;
+        let cursor = Point::ZERO;
+        let stored_cursor = Point::ZERO;
 
         let fg_color = Color::Reset;
         let bg_color = Color::Reset;
@@ -61,15 +66,15 @@ impl Screen {
         let new_cursor_visibility = true;
         let cur_cursor_visibility = true;
 
+        let windows = Vec::new();
+
         Ok(Self {
             new_screen,
             cur_screen,
             width,
             height,
-            cursor_x,
-            cursor_y,
-            stored_x,
-            stored_y,
+            cursor,
+            stored_cursor,
             force_redraw: false,
             fg_color,
             bg_color,
@@ -77,6 +82,7 @@ impl Screen {
             cur_cursor_style,
             new_cursor_visibility,
             cur_cursor_visibility,
+            windows,
         })
     }
 
@@ -100,7 +106,77 @@ impl Screen {
         Ok(())
     }
 
-    pub fn get_cursor_style(&mut self) -> CursorStyle {
+    pub fn get_width(&self) -> u16 {
+        if let Some(window) = self.windows.last() {
+            window.width
+        } else {
+            self.width
+        }
+    }
+
+    pub fn get_height(&self) -> u16 {
+        if let Some(window) = self.windows.last() {
+            window.height
+        } else {
+            self.height
+        }
+    }
+
+    pub fn get_size(&self) -> (u16, u16) {
+        if let Some(window) = self.windows.last() {
+            (window.width, window.height)
+        } else {
+            (self.width, self.height)
+        }
+    }
+
+    fn is_base_window(&self) -> bool {
+        self.windows.len() > 0
+    }
+
+    fn get_current_window(&self) -> WindowBounds {
+        if let Some(window) = self.windows.last() {
+            *window
+        } else {
+            WindowBounds::new(0, 0, self.width, self.height)
+        }
+    }
+
+    // TODO: maybe switch to errors instead of clamping the window
+    pub fn begin_window(&mut self, x: u16, y: u16, width: u16, height: u16) {
+        let (outer_x, outer_y, outer_width, outer_height) =
+            if let Some(window) = self.windows.last() {
+                (window.x, window.y, window.width, window.height)
+            } else {
+                (0, 0, self.width, self.height)
+            };
+
+        let x = (outer_x + x).min(outer_width - 1);
+        let y = (outer_y + y).min(outer_height - 1);
+        let width = width.min(outer_width - x);
+        let height = height.min(outer_height - x);
+
+        self.cursor = Point::ZERO;
+        self.stored_cursor = Point::ZERO;
+
+        self.windows.push(WindowBounds::new(x, y, width, height));
+    }
+
+    pub fn end_window(&mut self) {
+        if let Some(window) = self.windows.pop() {
+            self.cursor = Point::new(window.x + self.cursor.x, window.y + self.cursor.y);
+            self.stored_cursor = Point::new(
+                window.x + self.stored_cursor.x,
+                window.y + self.stored_cursor.y,
+            );
+        }
+    }
+
+    pub fn get_cursor(&self) -> (u16, u16) {
+        (self.cursor.x, self.cursor.y)
+    }
+
+    pub fn get_cursor_style(&self) -> CursorStyle {
         self.new_cursor_style
     }
 
@@ -108,7 +184,7 @@ impl Screen {
         self.new_cursor_style = style;
     }
 
-    pub fn get_cursor_visibility(&mut self) -> bool {
+    pub fn get_cursor_visibility(&self) -> bool {
         self.new_cursor_visibility
     }
 
@@ -124,103 +200,121 @@ impl Screen {
         self.set_cursor_visibility(false);
     }
 
-    pub fn save_position(&mut self) {
-        self.stored_x = self.cursor_x;
-        self.stored_y = self.cursor_y;
+    pub fn save_cursor(&mut self) {
+        self.stored_cursor = self.cursor;
     }
 
-    pub fn restore_position(&mut self) {
-        self.cursor_x = self.stored_x;
-        self.cursor_y = self.stored_y;
+    pub fn restore_cursor(&mut self) {
+        let (width, height) = self.get_size();
+        self.cursor = Point::new(
+            self.stored_cursor.x.min(width - 1),
+            self.stored_cursor.y.min(height - 1),
+        );
     }
 
     pub fn clear(&mut self, ty: ClearType) {
+        // TODO: probably start clearing with the current colors
+
+        let window = self.get_current_window();
         match ty {
             ClearType::All => {
-                self.new_screen.fill(Screen::EMPTY_CELL);
-            },
+                if self.is_base_window() {
+                    self.new_screen.fill(Screen::EMPTY_CELL);
+                } else {
+                    for y in (window.y as usize)..(window.y as usize + window.height as usize) {
+                        let index = y * self.width as usize + window.x as usize;
+                        self.new_screen[index..(index + window.width as usize)]
+                            .fill(Screen::EMPTY_CELL);
+                    }
+                }
+            }
             ClearType::CurrentLine => {
-                let start = self.cursor_y as usize * self.width as usize;
-                let end = start + self.width as usize;
+                let start = (window.y + self.cursor.y) as usize * self.width as usize;
+                let end = start + window.width as usize;
                 self.new_screen[start..end].fill(Screen::EMPTY_CELL);
-            },
+            }
             ClearType::UntilNewline => {
-                let line_start = self.cursor_y as usize * self.width as usize;
-                let start = line_start + self.cursor_x as usize;
-                let end = line_start + self.width as usize;
+                let line_start =
+                    (window.y + self.cursor.y) as usize * self.width as usize + window.x as usize;
+                let start = line_start + self.cursor.x as usize;
+                let end = line_start + window.width as usize;
                 self.new_screen[start..end].fill(Screen::EMPTY_CELL);
-            },
+            }
             ClearType::Current => {
-                self.set_buffer_at(self.cursor_x as usize, self.cursor_y as usize, '\0');
-            },
+                let index = (window.y + self.cursor.y) as usize * self.width as usize
+                    + (window.x + self.cursor.x) as usize;
+                self.new_screen[index] = Screen::EMPTY_CELL;
+            }
         }
     }
 
     pub fn print<S: AsRef<str>>(&mut self, message: S) {
-        let mut x = self.cursor_x as usize;
-        let mut y = self.cursor_y as usize;
+        let window = self.get_current_window();
+        let window_x = window.x as usize;
+        let window_y = window.y as usize;
+        let window_width = window.width as usize;
+        let window_height = window.height as usize;
+
+        let mut x = self.cursor.x as usize;
+        let mut y = self.cursor.y as usize;
         let width = self.width as usize;
-        let height = self.height as usize;
 
-        message
-            .as_ref()
-            .chars()
-            .for_each(|c| {
-                match c {
-                    '\n' => {
-                        x = 0;
-                        y += 1;
-                        if y >= height {
-                            y = 0;
-                        }
-                    },
-                    c => {
-                        let index = y * width + x;
-                        self.new_screen[index].fg_color = self.fg_color;
-                        self.new_screen[index].bg_color = self.bg_color;
-                        self.new_screen[index].c = c;
-
-                        x += 1;
-                        if x >= width {
-                            x = 0;
-                            y += 1;
-                            if y >= height {
-                                y = 0;
-                            }
-                        }
-                    },
-                }
-            });
-
-        self.cursor_x = x.try_into().unwrap();
-        self.cursor_y = y.try_into().unwrap();
-    }
-
-    pub fn print_char(&mut self, c: char) {
-        match c {
+        message.as_ref().chars().for_each(|c| match c {
             '\n' => {
-                self.cursor_x = 0;
-                self.cursor_y += 1;
-                if self.cursor_y >= self.height {
-                    self.cursor_y = 0;
+                x = window_x;
+                y += 1;
+                if y >= window_x + window_height {
+                    y = window_y;
                 }
-            },
+            }
             c => {
-                // Override cell
-                let index = self.cursor_y as usize * self.width as usize + self.cursor_x as usize;
+                let index = y * width + x;
                 self.new_screen[index].fg_color = self.fg_color;
                 self.new_screen[index].bg_color = self.bg_color;
                 self.new_screen[index].c = c;
 
-                self.cursor_x += 1;
-                if self.cursor_x >= self.width {
-                    self.cursor_x = 0;
-                    self.cursor_y += 1;
-                    if self.cursor_y >= self.height {
-                        self.cursor_y = 0;
+                x += 1;
+                if x >= window_x + window_width {
+                    x = window_x;
+                    y += 1;
+                    if y >= window_y + window_height {
+                        y = window_y;
                     }
                 }
-            },
+            }
+        });
+
+        self.cursor = Point::new(x.try_into().unwrap(), y.try_into().unwrap());
+    }
+
+    pub fn print_char(&mut self, c: char) {
+        let window = self.get_current_window();
+
+        match c {
+            '\n' => {
+                self.cursor.x = 0;
+                self.cursor.y += 1;
+                if self.cursor.y >= window.height {
+                    self.cursor.y = 0;
+                }
+            }
+            c => {
+                // Override cell
+                let index = (window.y + self.cursor.y) as usize * self.width as usize
+                    + (window.x + self.cursor.x) as usize;
+                self.new_screen[index].fg_color = self.fg_color;
+                self.new_screen[index].bg_color = self.bg_color;
+                self.new_screen[index].c = c;
+
+                self.cursor.x += 1;
+                if self.cursor.x >= window.width {
+                    self.cursor.x = 0;
+                    self.cursor.y += 1;
+                    if self.cursor.y >= window.height {
+                        self.cursor.y = 0;
+                    }
+                }
+            }
         }
     }
 
@@ -230,8 +324,9 @@ impl Screen {
     }
 
     pub fn move_to(&mut self, x: u16, y: u16) {
-        self.cursor_x = x.clamp(0, self.width - 1);
-        self.cursor_y = y.clamp(0, self.height - 1);
+        let window = self.get_current_window();
+        self.cursor.x = x.clamp(0, window.width - 1);
+        self.cursor.y = y.clamp(0, window.height - 1);
     }
 
     pub fn clear_colors(&mut self) {
@@ -253,6 +348,8 @@ impl Screen {
     }
 
     pub fn resize(&mut self, width: u16, height: u16) {
+        // FIXME: fix all windows after resize or don't allow resize with active windows
+
         // swap width
         let old_width = self.width;
         let old_height = self.height;
@@ -260,7 +357,8 @@ impl Screen {
         self.height = height;
 
         // create new buffer
-        let mut new_buffer = vec![Screen::EMPTY_CELL; width as usize * height as usize].into_boxed_slice();
+        let mut new_buffer =
+            vec![Screen::EMPTY_CELL; width as usize * height as usize].into_boxed_slice();
         // fill new buffer
         let common_width = old_width.min(width) as usize;
         let common_height = old_height.min(height) as usize;
@@ -276,10 +374,10 @@ impl Screen {
         self.cur_screen = self.new_screen.clone();
 
         // clamp cursor position to new size
-        self.cursor_x = self.cursor_x.min(width - 1);
-        self.cursor_y = self.cursor_y.min(height - 1);
-        self.stored_x = self.stored_x.min(width - 1);
-        self.stored_y = self.stored_y.min(height - 1);
+        self.cursor.x = self.cursor.x.min(width - 1);
+        self.cursor.y = self.cursor.y.min(height - 1);
+        self.stored_cursor.x = self.stored_cursor.x.min(width - 1);
+        self.stored_cursor.y = self.stored_cursor.y.min(height - 1);
 
         self.force_redraw = true;
     }
@@ -289,7 +387,7 @@ impl Screen {
 
         let width = self.width as usize;
         let height = self.height as usize;
-    
+
         let mut fg_color = Color::Reset;
         let mut bg_color = Color::Reset;
 
@@ -308,7 +406,12 @@ impl Screen {
                     let x = start % width;
                     let y = start / width;
                     stdout.queue(MoveTo(x as u16, y as u16))?;
-                    stdout.queue(Print(self.new_screen[start..i].iter().map(|cell| cell.c).collect::<String>()))?;
+                    stdout.queue(Print(
+                        self.new_screen[start..i]
+                            .iter()
+                            .map(|cell| cell.c)
+                            .collect::<String>(),
+                    ))?;
                 }
 
                 // change colors
@@ -330,7 +433,12 @@ impl Screen {
             let x = start % width;
             let y = start / width;
             stdout.queue(MoveTo(x as u16, y as u16))?;
-            stdout.queue(Print(self.new_screen[start..i].iter().map(|cell| cell.c).collect::<String>()))?;
+            stdout.queue(Print(
+                self.new_screen[start..i]
+                    .iter()
+                    .map(|cell| cell.c)
+                    .collect::<String>(),
+            ))?;
         }
 
         Ok(())
@@ -345,7 +453,7 @@ impl Screen {
         } else {
             let width = self.width as usize;
             let height = self.height as usize;
-        
+
             let mut fg_color = Color::Reset;
             let mut bg_color = Color::Reset;
 
@@ -364,7 +472,12 @@ impl Screen {
                         let x = start % width;
                         let y = start / width;
                         stdout.queue(MoveTo(x as u16, y as u16))?;
-                        stdout.queue(Print(self.new_screen[start..i].iter().map(|cell| cell.c).collect::<String>()))?;
+                        stdout.queue(Print(
+                            self.new_screen[start..i]
+                                .iter()
+                                .map(|cell| cell.c)
+                                .collect::<String>(),
+                        ))?;
                     }
 
                     i += 1;
@@ -382,7 +495,12 @@ impl Screen {
                             let x = start % width;
                             let y = start / width;
                             stdout.queue(MoveTo(x as u16, y as u16))?;
-                            stdout.queue(Print(self.new_screen[start..i].iter().map(|cell| cell.c).collect::<String>()))?;
+                            stdout.queue(Print(
+                                self.new_screen[start..i]
+                                    .iter()
+                                    .map(|cell| cell.c)
+                                    .collect::<String>(),
+                            ))?;
                         }
 
                         // change colors
@@ -405,7 +523,12 @@ impl Screen {
                 let x = start % width;
                 let y = start / width;
                 stdout.queue(MoveTo(x as u16, y as u16))?;
-                stdout.queue(Print(self.new_screen[start..i].iter().map(|cell| cell.c).collect::<String>()))?;
+                stdout.queue(Print(
+                    self.new_screen[start..i]
+                        .iter()
+                        .map(|cell| cell.c)
+                        .collect::<String>(),
+                ))?;
             }
         }
 
@@ -422,7 +545,7 @@ impl Screen {
             self.cur_cursor_visibility = self.new_cursor_visibility;
         }
 
-        stdout.queue(MoveTo(self.cursor_x, self.cursor_y))?;
+        stdout.queue(MoveTo(self.cursor.x, self.cursor.y))?;
         stdout.flush()?;
 
         self.force_redraw = false;
@@ -430,12 +553,5 @@ impl Screen {
         self.cur_screen.copy_from_slice(&self.new_screen);
 
         Ok(())
-    }
-
-    fn set_buffer_at(&mut self, x: usize, y: usize, value: char) {
-        let index = y * self.width as usize + x;
-        self.new_screen[index].c = value;
-        /* println!("Index: {}", index);
-        println!("Value: {} :: {}", value, self.buffer[index].value); */
     }
 }
