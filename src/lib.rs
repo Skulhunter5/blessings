@@ -15,7 +15,8 @@ mod cursor;
 mod util;
 
 pub use cursor::CursorStyle;
-use util::{Point, WindowBounds};
+use util::Point;
+pub use util::WindowBounds;
 
 #[derive(Debug, Clone, Copy)]
 pub enum ClearType {
