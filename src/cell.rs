@@ -9,7 +9,11 @@ pub struct Cell {
 
 impl Cell {
     pub const EMPTY_CHAR: char = ' ';
-    pub const EMPTY: Cell = Cell { fg_color: Color::Reset, bg_color: Color::Reset, c: Cell::EMPTY_CHAR };
+    pub const EMPTY: Cell = Cell {
+        fg_color: Color::Reset,
+        bg_color: Color::Reset,
+        c: Cell::EMPTY_CHAR,
+    };
 
     pub fn new(fg_color: Color, bg_color: Color, c: char) -> Self {
         Self {
